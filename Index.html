@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Multi-User File System</title>
+  <style>
+    body {
+      font-family: Arial;
+      background: #f0f2f5;
+      padding: 20px;
+    }
+    h1 { color: #333; }
+    input, select, button {
+      margin: 5px;
+      padding: 8px;
+    }
+    pre {
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 10px;
+      white-space: pre-wrap;
+    }
+    #disk {
+      margin-top: 15px;
+      font-family: monospace;
+      background: #eee;
+      padding: 10px;
+    }
+    .timeline {
+      display: flex;
+      margin-top: 10px;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .block {
+      width: 30px;
+      height: 30px;
+      background-color: #3498db;
+      border-radius: 5px;
+      text-align: center;
+      color: white;
+      line-height: 30px;
+      transition: all 0.5s ease;
+    }
+    .active {
+      background-color: #e74c3c;
+    }
+    #path {
+      margin: 10px 0;
+      font-weight: bold;
+      color: #555;
+    }
+    #metaModal {
+      display: none;
+      position: fixed;
+      top: 20%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: white;
+      padding: 20px;
+      border: 1px solid #ccc;
+      box-shadow: 0 0 10px #aaa;
+      z-index: 999;
+    }
+    .seek {
+      margin: 10px 0;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🔐 Multi-User File System</h1>
+
+<!-- User selection dropdown -->
+<label for="user">Logged in as:</label>
+<select id="user">
+  <option value="admin">admin</option>
+  <option value="user1">user1</option>
+  <option value="user2">user2</option>
+</select>
+
+<br><br>
+
+<!-- Inputs for filename, allocation type, file size and permissions -->
+<input id="filename" placeholder="Filename" />
+<select id="allocation">
+  <option value="contiguous">Contiguous</option>
+  <option value="linked">Linked</option>
+  <option value="indexed">Indexed</option>
+</select>
+<input id="filesize" type="number" placeholder="Size" min="1" value="3" />
+<input id="permissions" placeholder="Permissions (e.g. rwx)" value="rwx" />
+<!-- Buttons for file operations -->
+<button onclick="createFile()">Create</button>
+<button onclick="deleteFile()">Delete</button>
+<button onclick="searchFile()">Search</button>
+<button onclick="accessFCFS()">Access FCFS</button>
+<button onclick="accessSSTF()">Access SSTF</button>
+
+<br><br>
+
+<!-- Inputs and buttons for directory operations -->
+<input id="dirname" placeholder="Directory name" />
+<button onclick="makeDir()">Make Dir</button>
+<button onclick="changeDir()">Change Dir</button>
+<button onclick="listDir()">List Dir</button>
+
+<!-- Buttons to save and load state from localStorage -->
+<button onclick="saveState()">💾 Save</button>
+<button onclick="loadState()">🔁 Load</button>
+
+<!-- Display current path -->
+<div id="path">📍 Path: /</div>
+<!-- Output area for messages and directory listing -->
+<pre id="output"></pre>
+<!-- Visual disk block display -->
+<div id="disk"></div>
+
+<!-- FCFS scheduling timeline -->
+<h3>🧭 FCFS Timeline</h3>
+<div class="timeline" id="timelineFCFS"></div>
+<div id="seekFCFS" class="seek"></div>
+
+<!-- SSTF scheduling timeline -->
+<h3>🔄 SSTF Timeline</h3>
+<div class="timeline" id="timelineSSTF"></div>
+<div id="seekSSTF" class="seek"></div>
+
+<!-- Modal to show file metadata -->
+<div id="metaModal">
+  <h3>📄 File Metadata</h3>
+  <div id="metaContent"></div>
+  <button onclick="document.getElementById('metaModal').style.display='none'">Close</button>
+</div>
+
+<script>
+// Class representing a file with metadata and allocated blocks
+class File {
+  constructor(name, type, size, permissions, owner) {
+    this.name = name;               // File name
+    this.type = type;               // Allocation type (contiguous/linked/indexed)
+    this.size = size;               // File size in blocks
+    this.permissions = permissions; // File permissions string like 'rwx'
+    this.owner = owner;             // Owner username
+    this.blocks = [];               // List of allocated block indices
+    this.createdAt = new Date();    // Creation date-time
+  }
+}
+
+// Class representing a directory with files and subdirectories
+class Directory {
+  constructor(name = "root", parent = null) {
+    this.name = name;               // Directory name
+    this.parent = parent;           // Parent directory reference
+    this.subdirs = [];              // List of subdirectories
+    this.files = [];                // List of files in directory
+  }
+  addSubdirectory(dir) {
+    dir.parent = this;              // Set parent of new subdirectory
+    this.subdirs.push(dir);         // Add to subdirs list
+  }
+  findSubdir(name) {
+    return this.subdirs.find(d => d.name === name); // Find subdir by name
+  }
+  findFile(name) {
+    return this.files.find(f => f.name === name);   // Find file by name
+  }
+  addFile(file) {
+    this.files.push(file);          // Add a file to directory
+  }
+  deleteFile(name) {
+    this.files = this.files.filter(f => f.name !== name); // Remove file by name
+  }
+  listContents() {
+    // Returns formatted string of directory contents
+    return `📁 ${this.name}/\nSubdirs: ${this.subdirs.map(d => d.name).join(', ') || 'None'}\nFiles: ${this.files.map(f => f.name).join(', ') || 'None'}`;
+  }
+}
+
+// Bitmap-based disk allocator for managing blocks on disk
+class BitmapAllocator {
+  constructor(size = 100) {
+    this.size = size;               // Total blocks in disk
+    this.bitmap = Array(size).fill(0);  // 0 means free, 1 means allocated
+    this.disk = Array(size).fill(null); // Stores file names or null
+  }
+
+  // Helper: find random free blocks for linked or indexed allocation
+  findFreeRandom(count) {
+    const freeBlocks = [];
+    for (let i = 0; i < this.size; i++) {
+      if (this.bitmap[i] === 0) freeBlocks.push(i);
+    }
+    if (freeBlocks.length < count) return null;
+    
+    // Shuffle freeBlocks randomly (Fisher-Yates shuffle)
+    for (let i = freeBlocks.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [freeBlocks[i], freeBlocks[j]] = [freeBlocks[j], freeBlocks[i]];
+    }
+    
+    return freeBlocks.slice(0, count);
+  }
+
+  // Allocate blocks contiguously for the file
+  contiguous(file) {
+    for (let i = 0; i <= this.size - file.size; i++) {
+      // Check if blocks i..i+size-1 are free
+      if (this.bitmap.slice(i, i + file.size).every(b => b === 0)) {
+        // Mark them allocated and assign to file
+        for (let j = i; j < i + file.size; j++) {
+          this.bitmap[j] = 1;
+          this.disk[j] = file.name;
+          file.blocks.push(j);
+        }
+        return true; // Allocation successful
+      }
+    }
+    return false; // Not enough contiguous space
+  }
+
+  // Allocate blocks randomly linked
+  linked(file) {
+    const free = this.findFreeRandom(file.size);
+    if (!free) return false; // Not enough space
+    free.forEach(b => {
+      this.bitmap[b] = 1;
+      this.disk[b] = file.name;
+      file.blocks.push(b);
+    });
+    return true;
+  }
+
+  // Allocate blocks indexed (one block for index + data blocks)
+  indexed(file) {
+    const free = this.findFreeRandom(file.size + 1);
+    if (!free) return false;
+    const [indexBlock, ...dataBlocks] = free;
+    this.bitmap[indexBlock] = 1;
+    this.disk[indexBlock] = `${file.name}_index`; // Mark index block
+    file.blocks.push(indexBlock);
+    dataBlocks.forEach(b => {
+      this.bitmap[b] = 1;
+      this.disk[b] = file.name;
+      file.blocks.push(b);
+    });
+    return true;
+  }
+
+  // Allocate file blocks based on allocation type
+  allocate(file) {
+    switch (file.type) {
+      case 'contiguous': return this.contiguous(file);
+      case 'linked': return this.linked(file);
+      case 'indexed': return this.indexed(file);
+    }
+  }
+
+  // Deallocate file blocks freeing the space
+  deallocate(file) {
+    file.blocks.forEach(b => {
+      this.bitmap[b] = 0;
+      this.disk[b] = null;
+    });
+    file.blocks = [];
+  }
+
+  // Returns a string representing disk blocks visually
+  printDisk() {
+    return this.disk.map((b, i) => {
+      const label = b || '-';
+      return `<span title="${label}" style="display:inline-block;min-width:50px;">[${i}:${label}]</span>`;
+    }).join(' ');
+  }
+
+  // Get all block indices belonging to a file (including index block)
+  getFileBlocks(name) {
+    return this.disk.map((b, i) => (b === name || b === `${name}_index`) ? i : null).filter(i => i !== null);
+  }
+}
+
+// Disk scheduling algorithms class
+class DiskScheduler {
+  constructor() {
+    this.head = 0; // Current head position on disk
+  }
+
+  // First-Come-First-Serve scheduling
+  fcfs(reqs) {
+    let order = [...reqs], total = 0, curr = this.head;
+    order.forEach(r => {
+      total += Math.abs(curr - r);
+      curr = r;
+    });
+    return { order, total };
+  }
+
+  // Shortest Seek Time First scheduling
+  sstf(reqs) {
+    let list = [...reqs], order = [], curr = this.head, total = 0;
+    while (list.length) {
+      // Find closest request to current head
+      let near = list.reduce((a, b) => Math.abs(a - curr) < Math.abs(b - curr) ? a : b);
+      total += Math.abs(curr - near);
+      curr = near;
+      order.push(near);
+      list.splice(list.indexOf(near), 1);
+    }
+    return { order, total };
+  }
+
+  // Animate the seek order in the timeline UI
+  animate(order, timelineId, seekId, label) {
+    const timeline = document.getElementById(timelineId);
+    const seekText = document.getElementById(seekId);
+    timeline.innerHTML = '';
+    order.forEach((block, index) => {
+      const blockDiv = document.createElement('div');
+      blockDiv.className = 'block';
+      blockDiv.textContent = block;
+      timeline.appendChild(blockDiv);
+    });
+    let i = 0;
+    seekText.textContent = `${label} Total Seek: 0`;
+    const interval = setInterval(() => {
+      if (i > 0) timeline.children[i-1].classList.remove('active');
+      if (i < order.length) {
+        timeline.children[i].classList.add('active');
+        const totalSeek = order.slice(0, i+1).reduce((acc, val, idx, arr) => {
+          if (idx === 0) return 0;
+          return acc + Math.abs(arr[idx] - arr[idx-1]);
+        }, 0);
+        seekText.textContent = `${label} Total Seek: ${totalSeek}`;
+        i++;
+      } else {
+        clearInterval(interval);
+      }
+    }, 500);
+  }
+}
+
+// Initialize root directory and global variables
+const root = new Directory();
+let currentDir = root;
+const disk = new BitmapAllocator(100);
+const scheduler = new DiskScheduler();
+
+// Utility: Update the path display based on currentDir
+function updatePath() {
+  let path = [];
+  let dir = currentDir;
+  while (dir != null) {
+    path.unshift(dir.name);
+    dir = dir.parent;
+  }
+  document.getElementById('path').textContent = `📍 Path: /${path.join('/')}`;
+}
+
+// Recursive search for file in directory and subdirectories
+function recursiveSearch(dir, filename) {
+  let file = dir.findFile(filename);
+  if (file) return file;
+  for (let subdir of dir.subdirs) {
+    const found = recursiveSearch(subdir, filename);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Function to create a new file
+function createFile() {
+  const user = document.getElementById('user').value;
+  const name = document.getElementById('filename').value.trim();
+  const type = document.getElementById('allocation').value;
+  const size = parseInt(document.getElementById('filesize').value);
+  const perm = document.getElementById('permissions').value.trim();
+
+  if (!name) {
+    alert("Please enter a filename");
+    return;
+  }
+  if (size <= 0) {
+    alert("Size must be positive");
+    return;
+  }
+  if (currentDir.findFile(name)) {
+    alert("File with this name already exists in current directory");
+    return;
+  }
+  
+  const file = new File(name, type, size, perm, user);
+  const allocated = disk.allocate(file);
+  if (!allocated) {
+    alert("Not enough disk space for allocation");
+    return;
+  }
+  currentDir.addFile(file);
+  displayOutput(`File '${name}' created successfully.`);
+  updateDisk();
+}
+
+// Function to delete a file
+function deleteFile() {
+  const user = document.getElementById('user').value;
+  const name = document.getElementById('filename').value.trim();
+  if (!name) {
+    alert("Please enter filename to delete");
+    return;
+  }
+  const file = currentDir.findFile(name);
+  if (!file) {
+    alert("File not found in current directory");
+    return;
+  }
+  if (file.owner !== user && user !== 'admin') {
+    alert("You don't have permission to delete this file");
+    return;
+  }
+  disk.deallocate(file);
+  currentDir.deleteFile(name);
+  displayOutput(`File '${name}' deleted successfully.`);
+  updateDisk();
+}
+
+// Function to search for a file recursively
+function searchFile() {
+  const name = document.getElementById('filename').value.trim();
+  if (!name) {
+    alert("Please enter filename to search");
+    return;
+  }
+  const file = recursiveSearch(currentDir, name);
+  if (file) {
+    showMetadata(file);
+  } else {
+    displayOutput(`File '${name}' not found.`);
+  }
+}
+
+// Show file metadata modal
+function showMetadata(file) {
+  let meta = `
+    Name: ${file.name}
+    Owner: ${file.owner}
+    Size: ${file.size} blocks
+    Allocation Type: ${file.type}
+    Permissions: ${file.permissions}
+    Created At: ${file.createdAt.toLocaleString()}
+    Blocks: ${file.blocks.join(', ')}
+  `;
+  document.getElementById('metaContent').textContent = meta;
+  document.getElementById('metaModal').style.display = 'block';
+}
+
+// Make a new directory inside currentDir
+function makeDir() {
+  const name = document.getElementById('dirname').value.trim();
+  if (!name) {
+    alert("Please enter directory name");
+    return;
+  }
+  if (currentDir.findSubdir(name)) {
+    alert("Directory already exists");
+    return;
+  }
+  const dir = new Directory(name, currentDir);
+  currentDir.addSubdirectory(dir);
+  displayOutput(`Directory '${name}' created.`);
+  updatePath();
+}
+
+// Change current directory
+function changeDir() {
+  const name = document.getElementById('dirname').value.trim();
+  if (!name) {
+    alert("Please enter directory name");
+    return;
+  }
+  if (name === '..') {
+    if (currentDir.parent != null) {
+      currentDir = currentDir.parent;
+      displayOutput(`Moved to parent directory.`);
+      updatePath();
+    } else {
+      alert("Already at root directory");
+    }
+    return;
+  }
+  const dir = currentDir.findSubdir(name);
+  if (dir) {
+    currentDir = dir;
+    displayOutput(`Changed directory to '${name}'.`);
+    updatePath();
+  } else {
+    alert("Directory not found");
+  }
+}
+
+// List contents of current directory
+function listDir() {
+  const list = currentDir.listContents();
+  displayOutput(list);
+}
+
+// Display text in output area
+function displayOutput(text) {
+  const out = document.getElementById('output');
+  out.textContent = text;
+}
+
+// Update disk visualization
+function updateDisk() {
+  const diskDiv = document.getElementById('disk');
+  diskDiv.innerHTML = disk.printDisk();
+}
+
+// Save state to localStorage
+function saveState() {
+  // Serialize directory structure, files, bitmap and disk head
+  const state = {
+    user: document.getElementById('user').value,
+    head: scheduler.head,
+    bitmap: disk.bitmap,
+    disk: disk.disk,
+    // Serialize directory tree recursively
+    root: serializeDir(root)
+  };
+  localStorage.setItem('fsState', JSON.stringify(state));
+  alert("State saved!");
+}
+
+// Load state from localStorage
+function loadState() {
+  const data = localStorage.getItem('fsState');
+  if (!data) {
+    alert("No saved state found");
+    return;
+  }
+  const state = JSON.parse(data);
+  // Restore bitmap and disk arrays
+  disk.bitmap = state.bitmap;
+  disk.disk = state.disk;
+  scheduler.head = state.head;
+  // Deserialize directory tree
+  deserializeDir(state.root, root);
+  currentDir = root;
+  updateDisk();
+  updatePath();
+  displayOutput("State loaded.");
+}
+
+// Helper: serialize directory recursively to plain object
+function serializeDir(dir) {
+  return {
+    name: dir.name,
+    files: dir.files.map(f => ({
+      name: f.name,
+      type: f.type,
+      size: f.size,
+      permissions: f.permissions,
+      owner: f.owner,
+      blocks: f.blocks,
+      createdAt: f.createdAt
+    })),
+    subdirs: dir.subdirs.map(sub => serializeDir(sub))
+  };
+}
+
+// Helper: deserialize plain object to Directory structure (overwrites targetDir)
+function deserializeDir(obj, targetDir) {
+  targetDir.name = obj.name;
+  targetDir.files = obj.files.map(f => {
+    const file = new File(f.name, f.type, f.size, f.permissions, f.owner);
+    file.blocks = f.blocks;
+    file.createdAt = new Date(f.createdAt);
+    return file;
+  });
+  targetDir.subdirs = [];
+  obj.subdirs.forEach(sub => {
+    const newDir = new Directory(sub.name, targetDir);
+    deserializeDir(sub, newDir);
+    targetDir.subdirs.push(newDir);
+  });
+}
+
+// Disk access simulation using FCFS scheduling
+function accessFCFS() {
+  const name = document.getElementById('filename').value.trim();
+  if (!name) {
+    alert("Please enter filename");
+    return;
+  }
+  const file = recursiveSearch(currentDir, name);
+  if (!file) {
+    alert("File not found");
+    return;
+  }
+  if (!file.blocks.length) {
+    alert("File has no allocated blocks");
+    return;
+  }
+  const result = scheduler.fcfs(file.blocks);
+  scheduler.animate(result.order, 'timelineFCFS', 'seekFCFS', 'FCFS');
+}
+
+// Disk access simulation using SSTF scheduling
+function accessSSTF() {
+  const name = document.getElementById('filename').value.trim();
+  if (!name) {
+    alert("Please enter filename");
+    return;
+  }
+  const file = recursiveSearch(currentDir, name);
+  if (!file) {
+    alert("File not found");
+    return;
+  }
+  if (!file.blocks.length) {
+    alert("File has no allocated blocks");
+    return;
+  }
+  const result = scheduler.sstf(file.blocks);
+  scheduler.animate(result.order, 'timelineSSTF', 'seekSSTF', 'SSTF');
+}
+
+// Initialize UI on load
+updateDisk();
+updatePath();
+displayOutput("Ready.");
+
+</script>
+
+</body>
+</html>
