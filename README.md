@@ -43,25 +43,6 @@ Designed to showcase **problem-solving skills, system-level thinking, and algori
 - Save & restore complete system state
 
 ---
-
-## 📸 Screenshots
-
-> Place screenshots inside a `/screenshots` folder.
-
-### Main Interface
-![Main UI](screenshots/main-ui.png)
-
-### Disk Allocation Visualization
-![Disk Blocks](screenshots/disk-blocks.png)
-
-### FCFS Scheduling
-![FCFS](screenshots/fcfs.png)
-
-### SSTF Scheduling
-![SSTF](screenshots/sstf.png)
-
----
-
 ## 🎯 Why This Project Matters
 
 This project demonstrates **strong fundamentals in Operating Systems**, **algorithmic thinking**, and **front-end development**, making it suitable for:
