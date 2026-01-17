@@ -1,3 +1,0 @@
-This project simulates the working of a computer file system to demonstrate how files and directories are managed by an operating system.
-It provides functionalities such as file creation, deletion, searching, and directory management. The system also visualizes disk space allocation and implements different file allocation techniques and disk scheduling algorithms.
-The project helps in understanding core operating system concepts like file organization, metadata management, access control, and disk management in a practical manner.
